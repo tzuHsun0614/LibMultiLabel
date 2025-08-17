@@ -175,6 +175,54 @@ def _prepare_options(x: sparse.csr_matrix, options: str) -> tuple[sparse.csr_mat
     options = " ".join(options_split)
     return x, options, bias
 
+def _prepare_options_with_para(x: sparse.csr_matrix, options: str) -> tuple[sparse.csr_matrix, str, float]:
+
+    
+    #filter out unsupported before passing to parameter
+    if options is None:
+        options = ""
+    if any(o in options for o in ["-R", "-C", "-v"]):
+        raise ValueError("-R, -C and -v are not supported")
+
+    options_para = parameter(options)
+    if options_para.solver_type < 0 or options_para.solver_type > 7:
+        raise ValueError("Invalid LIBLINEAR solver type. Only classification solvers are allowed.")
+
+    #Remove -B in str options, since we wrap it into x
+    #And fixed append B only when bias >= 0
+    if options_para.bias >=0:
+        bias = options_para.bias
+        x = sparse.hstack(
+            [
+                x,
+                np.full((x.shape[0], 1), bias),
+            ],
+            "csr",
+        )
+
+    
+
+    if not "-s" in options:
+        options += f" -s {options_para.solver_type}"
+    # Original one took away -B, so we do the same
+    if "-B" in options:
+        idx = options.find("-B")
+        if idx +5 > len(options):
+            options = options[:idx-1]
+        else:
+            options = options[:idx] + options[idx + 5:]  
+    if not "-q" in options:
+        options += " -q"
+    # NOT SURE WHAT -m DOES, but still added it
+    if not "-m" in options:
+        options += f" -m {int(os.cpu_count() / 2)}"
+
+    # Remove leading spaces, since removing -s and -B may cause leading spaces
+    options = options.lstrip()
+
+    return x,options,options_para.bias
+
+
 
 def train_thresholding(
     y: sparse.csr_matrix,
