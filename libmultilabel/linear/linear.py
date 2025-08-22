@@ -160,13 +160,14 @@ def _prepare_options(x: sparse.csr_matrix, options: str) -> tuple[sparse.csr_mat
         i = options_split.index("-B")
         bias = float(options_split[i + 1])
         options_split = options_split[:i] + options_split[i + 2 :]
-        x = sparse.hstack(
-            [
-                x,
-                np.full((x.shape[0], 1), bias),
-            ],
-            "csr",
-        )
+        if bias >= 0:
+            x = sparse.hstack(
+                [
+                    x,
+                    np.full((x.shape[0], 1), bias),
+                ],
+                "csr",
+            )
     if not "-q" in options_split:
         options_split.append("-q")
     if not "-m" in options:
