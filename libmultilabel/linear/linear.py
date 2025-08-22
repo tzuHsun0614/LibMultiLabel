@@ -7,6 +7,7 @@ import numpy as np
 import scipy.sparse as sparse
 from liblinear.liblinearutil import train, problem, parameter, solver_names
 from tqdm import tqdm
+import ctypes
 
 __all__ = [
     "train_1vsrest",
@@ -106,7 +107,7 @@ def train_1vsrest(
         A model which can be used in predict_values.
     """
     # Follows the MATLAB implementation at https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/multilabel/
-    x, options, bias = _prepare_options(x, options)
+    x, param = _prepare_options(x, options)
 
     y = y.tocsc()
     num_class = y.shape[1]
@@ -117,18 +118,18 @@ def train_1vsrest(
         logging.info(f"Training one-vs-rest model on {num_class} labels")
     for i in tqdm(range(num_class), disable=not verbose):
         yi = y[:, i].toarray().reshape(-1)
-        weights[:, i] = _do_train(2 * yi - 1, x, options).ravel()
+        weights[:, i] = _do_train(2 * yi - 1, x, param).ravel()
 
     return FlatModel(
         name="1vsrest",
         weights=np.asmatrix(weights),
-        bias=bias,
+        bias=param.bias,
         thresholds=0,
         multiclass=multiclass,
     )
 
 
-def _prepare_options(x: sparse.csr_matrix, options: str) -> tuple[sparse.csr_matrix, str, float]:
+def _prepare_options(x: sparse.csr_matrix, options: str) -> tuple[sparse.csr_matrix,parameter]:
     """Prepare options and x for multi-label training. Called in the first line of
     any training function.
 
@@ -137,61 +138,22 @@ def _prepare_options(x: sparse.csr_matrix, options: str) -> tuple[sparse.csr_mat
         options (str): The option string passed to liblinear.
 
     Returns:
-        tuple[sparse.csr_matrix, str, float]: Transformed x, transformed options and
-        bias parsed from options.
+        tuple[sparse.csr_matrix, param]: Transformed x and parameter object.
     """
-    if options is None:
-        options = ""
-    if any(o in options for o in ["-R", "-C", "-v"]):
-        raise ValueError("-R, -C and -v are not supported")
-
-    options_split = options.split()
-    if "-s" in options_split:
-        i = options_split.index("-s")
-        solver_type = int(options_split[i + 1])
-        if solver_type < 0 or solver_type > 7:
-            raise ValueError("Invalid LIBLINEAR solver type. Only classification solvers are allowed.")
-    else:
-        # workaround for liblinear warning about unspecified solver
-        options_split.extend(["-s", "1"])
-
-    bias = -1.0
-    if "-B" in options_split:
-        i = options_split.index("-B")
-        bias = float(options_split[i + 1])
-        options_split = options_split[:i] + options_split[i + 2 :]
-        x = sparse.hstack(
-            [
-                x,
-                np.full((x.shape[0], 1), bias),
-            ],
-            "csr",
-        )
-    if not "-q" in options_split:
-        options_split.append("-q")
-    if not "-m" in options:
-        options_split.append(f"-m {int(os.cpu_count() / 2)}")
-
-    options = " ".join(options_split)
-    return x, options, bias
-
-def _prepare_options_with_para(x: sparse.csr_matrix, options: str) -> tuple[sparse.csr_matrix, str, float]:
-
+    if not "-q" in options:
+        options = f"{options} -q"
     
-    #filter out unsupported before passing to parameter
-    if options is None:
-        options = ""
-    if any(o in options for o in ["-R", "-C", "-v"]):
+    param = parameter(options)
+
+    if param.regularize_bias == 0 or param.flag_find_parameters or param.flag_cross_validation:
         raise ValueError("-R, -C and -v are not supported")
 
-    options_para = parameter(options)
-    if options_para.solver_type < 0 or options_para.solver_type > 7:
+    if param.solver_type < 0 or param.solver_type > 7:
         raise ValueError("Invalid LIBLINEAR solver type. Only classification solvers are allowed.")
 
-    #Remove -B in str options, since we wrap it into x
     #And fixed append B only when bias >= 0
-    if options_para.bias >=0:
-        bias = options_para.bias
+    if param.bias >=0:
+        bias = param.bias
         x = sparse.hstack(
             [
                 x,
@@ -200,27 +162,14 @@ def _prepare_options_with_para(x: sparse.csr_matrix, options: str) -> tuple[spar
             "csr",
         )
 
+    if not "-m" in options:
+        param.flag_omp = True
+        param.nr_threads = int(os.cpu_count() / 2)
     
 
-    if not "-s" in options:
-        options += f" -s {options_para.solver_type}"
-    # Original one took away -B, so we do the same
-    if "-B" in options:
-        idx = options.find("-B")
-        if idx +5 > len(options):
-            options = options[:idx-1]
-        else:
-            options = options[:idx] + options[idx + 5:]  
-    if not "-q" in options:
-        options += " -q"
-    # NOT SURE WHAT -m DOES, but still added it
-    if not "-m" in options:
-        options += f" -m {int(os.cpu_count() / 2)}"
+    return x,param
 
-    # Remove leading spaces, since removing -s and -B may cause leading spaces
-    options = options.lstrip()
 
-    return x,options,options_para.bias
 
 
 
@@ -251,7 +200,7 @@ def train_thresholding(
     Returns:
         A model which can be used in predict_values.
     """
-    x, options, bias = _prepare_options(x, options)
+    x, param = _prepare_options(x, options)
 
     y = y.tocsc()
     num_class = y.shape[1]
@@ -270,28 +219,28 @@ def train_thresholding(
 
     for i in tqdm(label_order, disable=not verbose):
         yi = y[:, i].toarray().reshape(-1)
-        w, t, stats = _micromacro_one_label(2 * yi - 1, x, options, stats)
+        w, t, stats = _micromacro_one_label(2 * yi - 1, x, param, stats)
         weights[:, i] = w.ravel()
         thresholds[i] = t
 
     return FlatModel(
         name="thresholding",
         weights=np.asmatrix(weights),
-        bias=bias,
+        bias=param.bias,
         thresholds=thresholds,
         multiclass=multiclass,
     )
 
 
 def _micromacro_one_label(
-    y: np.ndarray, x: sparse.csr_matrix, options: str, stats: dict
+    y: np.ndarray, x: sparse.csr_matrix, param: parameter, stats: dict
 ) -> tuple[np.ndarray, float, dict]:
     """Perform cross-validation to select the threshold for a label.
 
     Args:
         y (np.ndarray): A +1/-1 array with dimensions number of instances * 1.
         x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
-        options (str): The option string passed to liblinear.
+        param (parameter): Instance of class parameter.
         stats (dict): A dictionary containing information needed to calculate Micro-F1.
             It includes the accumulated number of true positives, false positives, false
             negatives, and the number of labels processed.
@@ -326,7 +275,7 @@ def _micromacro_one_label(
         val_idx = perm[mask]
         train_idx = perm[np.logical_not(mask)]
 
-        w = _do_train(y[train_idx], x[train_idx], options)
+        w = _do_train(y[train_idx], x[train_idx], param)
         wTx = (x[val_idx] * w).A1
 
         sorted_wTx_index = np.argsort(wTx, kind="stable")
@@ -377,17 +326,17 @@ def _micromacro_one_label(
     stats["fp"] += fp_sum
     stats["fn"] += fn_sum
 
-    return _do_train(y, x, options), threshold, stats
+    return _do_train(y, x, param), threshold, stats
 
 
-def _do_train(y: np.ndarray, x: sparse.csr_matrix, options: str) -> np.matrix:
+def _do_train(y: np.ndarray, x: sparse.csr_matrix, param: parameter) -> np.matrix:
     """Wrap around liblinear.liblinearutil.train.
     Forcibly suppresses all IO regardless of options.
 
     Args:
         y (np.ndarray): A +1/-1 array with dimensions number of instances * 1.
         x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
-        options (str): The option string passed to liblinear.
+        param (parameter): Instance of class parameter.
 
     Returns:
         np.matrix: The weights.
@@ -396,7 +345,7 @@ def _do_train(y: np.ndarray, x: sparse.csr_matrix, options: str) -> np.matrix:
         return np.matrix(np.zeros((x.shape[1], 1)))
 
     prob = problem(y, x)
-    param = parameter(options)
+   
     if param.solver_type in [solver_names.L2R_L1LOSS_SVC_DUAL, solver_names.L2R_L2LOSS_SVC_DUAL]:
         param.w_recalc = True  # only works for solving L1/L2-SVM dual
     with silent_stderr():
@@ -480,7 +429,7 @@ def train_cost_sensitive(
         A model which can be used in predict_values.
     """
     # Follow the MATLAB implementation at https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/multilabel/
-    x, options, bias = _prepare_options(x, options)
+    x, param = _prepare_options(x, options)
 
     y = y.tocsc()
     num_class = y.shape[1]
@@ -491,25 +440,23 @@ def train_cost_sensitive(
         logging.info(f"Training cost-sensitive model for Macro-F1 on {num_class} labels")
     for i in tqdm(range(num_class), disable=not verbose):
         yi = y[:, i].toarray().reshape(-1)
-        w = _cost_sensitive_one_label(2 * yi - 1, x, options)
+        w = _cost_sensitive_one_label(2 * yi - 1, x, param)
         weights[:, i] = w.ravel()
 
     return FlatModel(
         name="cost_sensitive",
         weights=np.asmatrix(weights),
-        bias=bias,
+        bias=param.bias,
         thresholds=0,
         multiclass=multiclass,
     )
-
-
-def _cost_sensitive_one_label(y: np.ndarray, x: sparse.csr_matrix, options: str) -> np.ndarray:
+def _cost_sensitive_one_label(y: np.ndarray, x: sparse.csr_matrix, param: parameter) -> np.ndarray:
     """Loop over parameter space for cost-sensitive on a single label.
 
     Args:
         y (np.ndarray): A +1/-1 array with dimensions number of instances * 1.
         x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
-        options (str): The option string passed to liblinear.
+        param (parameter): Instance of class parameter.
 
     Returns:
         np.ndarray: The weights.
@@ -522,24 +469,44 @@ def _cost_sensitive_one_label(y: np.ndarray, x: sparse.csr_matrix, options: str)
 
     bestScore = -np.inf
     for a in param_space:
-        cv_options = f"{options} -w1 {a}"
-        pred = _cross_validate(y, x, cv_options, perm)
+        cv_param = _append_param_weight(param, a)
+        pred = _cross_validate(y, x, cv_param, perm)
         score = _fmeasure(y, pred)
         if bestScore < score:
             bestScore = score
             bestA = a
 
-    final_options = f"{options} -w1 {bestA}"
-    return _do_train(y, x, final_options)
+    final_param = _append_param_weight(param, bestA)
+    return _do_train(y, x, final_param)
 
+def _append_param_weight(param: parameter, new_weight: float) -> parameter:
+    """Since the weight array and weight_label are C array that initialized when the parameter instance is created,
+        so a helper function is needed to append a new weight to the end of the array.
 
-def _cross_validate(y: np.ndarray, x: sparse.csr_matrix, options: str, perm: np.ndarray) -> np.ndarray:
+    Args:
+        param (parameter): The instance of class parameter.
+        weight (float): The weight to be append.
+
+    Returns:
+        parameter: The modified parameter instance.
+    """
+    
+    labels = [*param.weight_label[:param.nr_weight], 1]
+    weights = [*param.weight[:param.nr_weight], new_weight]
+
+    param.nr_weight += 1
+    param.weight_label = (ctypes.c_int * param.nr_weight)(*labels)
+    param.weight = (ctypes.c_double * param.nr_weight)(*weights)
+
+    return param
+
+def _cross_validate(y: np.ndarray, x: sparse.csr_matrix, param: parameter, perm: np.ndarray) -> np.ndarray:
     """Cross-validation for cost-sensitive.
 
     Args:
         y (np.ndarray): A +1/-1 array with dimensions number of instances * 1.
         x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
-        options (str): The option string passed to liblinear.
+        param (parameter): Instance of class parameter.
 
     Returns:
         np.ndarray: Cross-validation result as a +1/-1 array.
@@ -552,8 +519,7 @@ def _cross_validate(y: np.ndarray, x: sparse.csr_matrix, options: str, perm: np.
         mask[np.arange(int(fold * l / nr_fold), int((fold + 1) * l / nr_fold))] = 1
         val_idx = perm[mask]
         train_idx = perm[mask != True]
-
-        w = _do_train(y[train_idx], x[train_idx], options)
+        w = _do_train(y[train_idx], x[train_idx], param)
         pred[val_idx] = (x[val_idx] * w).A1 > 0
 
     return 2 * pred - 1
@@ -584,7 +550,7 @@ def train_cost_sensitive_micro(
         A model which can be used in predict_values.
     """
     # Follows the MATLAB implementation at https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/multilabel/
-    x, options, bias = _prepare_options(x, options)
+    x, param = _prepare_options(x, options)
 
     y = y.tocsc()
     num_class = y.shape[1]
@@ -604,8 +570,9 @@ def train_cost_sensitive_micro(
             yi = y[:, i].toarray().reshape(-1)
             yi = 2 * yi - 1
 
-            cv_options = f"{options} -w1 {a}"
-            pred = _cross_validate(yi, x, cv_options, perm)
+            
+            cv_param = _append_param_weight(param, a)
+            pred = _cross_validate(yi, x, cv_param, perm)
             tp = tp + np.sum(np.logical_and(yi == 1, pred == 1))
             fn = fn + np.sum(np.logical_and(yi == 1, pred == -1))
             fp = fp + np.sum(np.logical_and(yi == -1, pred == 1))
@@ -615,16 +582,16 @@ def train_cost_sensitive_micro(
             bestScore = score
             bestA = a
 
-    final_options = f"{options} -w1 {bestA}"
+    final_param = _append_param_weight(param, bestA)
     for i in range(num_class):
         yi = y[:, i].toarray().reshape(-1)
-        w = _do_train(2 * yi - 1, x, final_options)
+        w = _do_train(2 * yi - 1, x, final_param)
         weights[:, i] = w.ravel()
 
     return FlatModel(
         name="cost_sensitive_micro",
         weights=np.asmatrix(weights),
-        bias=bias,
+        bias=param.bias,
         thresholds=0,
         multiclass=multiclass,
     )
@@ -649,7 +616,7 @@ def train_binary_and_multiclass(
     Returns:
         A model which can be used in predict_values.
     """
-    x, options, bias = _prepare_options(x, options)
+    x, param = _prepare_options(x, options)
     num_instances, num_labels = y.shape
     nonzero_instance_ids, nonzero_label_ids = y.nonzero()
     assert (
@@ -659,7 +626,6 @@ def train_binary_and_multiclass(
     y = np.squeeze(nonzero_label_ids)
 
     prob = problem(y, x)
-    param = parameter(options)
     if param.solver_type in [solver_names.L2R_L1LOSS_SVC_DUAL, solver_names.L2R_L2LOSS_SVC_DUAL]:
         param.w_recalc = True
     with silent_stderr():
@@ -685,7 +651,7 @@ def train_binary_and_multiclass(
     return FlatModel(
         name="binary_and_multiclass",
         weights=np.asmatrix(weights),
-        bias=bias,
+        bias=param.bias,
         thresholds=thresholds,
         multiclass=multiclass,
     )
