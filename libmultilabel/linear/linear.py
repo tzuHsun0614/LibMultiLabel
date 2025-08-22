@@ -138,7 +138,7 @@ def _prepare_options(x: sparse.csr_matrix, options: str) -> tuple[sparse.csr_mat
         options (str): The option string passed to liblinear.
 
     Returns:
-        tuple[sparse.csr_matrix, param]: Transformed x and parameter object.
+        tuple[sparse.csr_matrix, param]: Transformed x and parameter instance.
     """
     if not "-q" in options:
         options = f"{options} -q"
@@ -153,11 +153,10 @@ def _prepare_options(x: sparse.csr_matrix, options: str) -> tuple[sparse.csr_mat
 
     #And fixed append B only when bias >= 0
     if param.bias >=0:
-        bias = param.bias
         x = sparse.hstack(
             [
                 x,
-                np.full((x.shape[0], 1), bias),
+                np.full((x.shape[0], 1), param.bias),
             ],
             "csr",
         )
@@ -490,10 +489,8 @@ def _append_param_weight(param: parameter, new_weight: float) -> parameter:
     Returns:
         parameter: The modified parameter instance.
     """
-    
-    labels = [*param.weight_label[:param.nr_weight], 1]
-    weights = [*param.weight[:param.nr_weight], new_weight]
-
+    labels = list(param.weight_label[:param.nr_weight]) + [1]
+    weights = list(param.weight[:param.nr_weight]) + [new_weight]
     param.nr_weight += 1
     param.weight_label = (ctypes.c_int * param.nr_weight)(*labels)
     param.weight = (ctypes.c_double * param.nr_weight)(*weights)
